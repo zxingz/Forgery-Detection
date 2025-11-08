@@ -220,6 +220,39 @@ def smooth_boolean_mask2(mask, kernel_size=3):
 
     return new_mask
 
+def select_regions_with_high_iou(A: np.ndarray, B: np.ndarray, iou_threshold: float = 0.5):
+    """
+    Select regions in mask A that have IOU above threshold with any region in mask B.
+    Returns a boolean mask of selected regions in A.
+    """
+    from scipy.ndimage import label
+
+    # Label connected components in A and B
+    labeled_A, num_A = label(A)
+    labeled_B, num_B = label(B)
+
+    selected_mask = np.zeros_like(A, dtype=bool)
+
+    # For each region in A
+    for a_idx in range(1, num_A + 1):
+        region_A = labeled_A == a_idx
+        max_iou = 0
+        # Compare with each region in B
+        for b_idx in range(1, num_B + 1):
+            region_B = labeled_B == b_idx
+            intersection = np.logical_and(region_A, region_B).sum()
+            union = np.logical_or(region_A, region_B).sum()
+            if union == 0:
+                continue
+            iou = intersection / union
+            if iou > max_iou:
+                max_iou = iou
+        # If max IOU above threshold, select region
+        if max_iou >= iou_threshold:
+            selected_mask = np.logical_or(selected_mask, region_A)
+
+    return selected_mask
+
 def process_mask(row):
     
     mask_name = row["name"]
@@ -233,8 +266,8 @@ def process_mask(row):
     auth_img = Image.open(auth_image_path).convert('RGB')
     
     # Subtract auth_img from forged_img and convert to boolean mask
-    forged_array = np.sum(np.array(forged_img), axis=2)
-    forged_array = (forged_array - np.min(forged_array))/(np.max(forged_array) - np.min(forged_array))
+    forged_array = np.mean(np.array(forged_img), axis=2)
+    # forged_array = (forged_array - np.min(forged_array))/(np.max(forged_array) - np.min(forged_array))
     
     # # visualize the masks
     # plt.figure(figsize=(12, 4))
@@ -243,8 +276,8 @@ def process_mask(row):
     # plt.title(f'Forged')
     # plt.axis('off')
     
-    auth_array = np.sum(np.array(auth_img), axis=2)
-    auth_array = (auth_array - np.min(auth_array))/(np.max(auth_array) - np.min(auth_array))
+    auth_array = np.mean(np.array(auth_img), axis=2)
+    # auth_array = (auth_array - np.min(auth_array))/(np.max(auth_array) - np.min(auth_array))
     
     # # visualize the masks
     # plt.figure(figsize=(12, 4))
@@ -270,6 +303,7 @@ def process_mask(row):
     # plt.imshow(diff_boolean_mask, cmap='gray')
     # plt.title(f'Diff')
     # plt.axis('off')
+    
     
     if not np.any(diff_boolean_mask):
         return None
@@ -310,17 +344,15 @@ def process_mask(row):
     # plt.axis('off')
     
     
-    # diff_boolean_mask = resize_mask_to_patch_dimensions(diff_boolean_mask)
-    
-    # # visualize the masks
-    # plt.figure(figsize=(12, 4))
-    # plt.subplot(1, 2, 1)
-    # plt.imshow(diff_boolean_mask, cmap='gray')
-    # plt.title(f'Diff')
-    # plt.axis('off')
-    
     masked_img_boolean = row["bool_mask"]
     # masked_img_boolean = resize_mask_to_patch_dimensions(masked_img_boolean)
+    
+    #  # visualize the masks
+    # plt.figure(figsize=(12, 4))
+    # plt.subplot(1, 2, 1)
+    # plt.imshow(masked_img_boolean, cmap='gray')
+    # plt.title(f'OG Mask')
+    # plt.axis('off')
     
     
     # find intersections between diff_boolean_mask and masked_img_boolean
@@ -354,58 +386,33 @@ def process_mask(row):
             break
     forged_mask = last_forged_mask
     
+    # Select the regions with highest IOU
+    forged_mask = select_regions_with_high_iou(A=masked_img_boolean, B=forged_mask, iou_threshold=0.85)
+    
     # # visualize the masks
     # plt.figure(figsize=(12, 4))
     # plt.subplot(1, 2, 1)
-    # plt.imshow(resize_mask_to_patch_dimensions(forged_mask), cmap='gray')
+    # plt.imshow(forged_mask, cmap='gray')
     # plt.title(f'Forged')
     # plt.axis('off')
     
     # get auth mask
     auth_mask = masked_img_boolean & ~forged_mask
-    if not np.any(auth_mask):
-        return None
-    
-    # Smooth the boolean mask
-    kernel_size = 3
-    last_auth_mask = auth_mask.copy()
-    it = 0
-    while 1:
-        while 1:
-            it += 1
-            prev_mask = auth_mask.copy()
-            auth_mask = smooth_boolean_mask(auth_mask, kernel_size=kernel_size)
-            if np.array_equal(prev_mask, auth_mask):
-                del prev_mask
-                gc.collect()
-                break
-        n_comps = count_components_floodfill({"name":mask_name, \
-                                    "index":-1, \
-                                    "bool_mask":auth_mask})["n_comps"]
-        kernel_size += 2
-        if not np.any(auth_mask):
-            break
-        if np.array_equal(last_auth_mask, auth_mask):
-            continue
-        last_auth_mask = auth_mask
-        if n_comps <= 1:
-            break
-    auth_mask = last_auth_mask
     
     # # visualize the masks
     # plt.figure(figsize=(12, 4))
     # plt.subplot(1, 2, 1)
-    # plt.imshow(resize_mask_to_patch_dimensions(auth_mask), cmap='gray')
+    # plt.imshow(auth_mask, cmap='gray')
     # plt.title(f'Auth')
     # plt.axis('off')
 
 
     me = {"mask_name": mask_name, \
                 "index": row["index"], \
-                "auth_mask": resize_mask_to_patch_dimensions(auth_mask), \
-                "forged_mask": resize_mask_to_patch_dimensions(forged_mask),}
-    return me
-    # pickle.dump(me, open(os.path.join('mask_entities', f'{mask_name}.pkl'), 'wb'))
+                "auth_mask": auth_mask, \
+                "forged_mask": forged_mask,}
+    
+    pickle.dump(me, open(os.path.join('mask_entities', f'{mask_name}_{row["index"]}.pkl'), 'wb'))
 
 component_counts = pickle.load(open('component_counts.pkl', 'rb'))
 
@@ -426,8 +433,11 @@ component_counts = pickle.load(open('component_counts.pkl', 'rb'))
 # for row in tqdm(component_counts):
 #     process_mask(row)
 
-masked_entities = Parallel(n_jobs=-1)(delayed(process_mask)(row) for row in tqdm(component_counts))
-# # masked_entities = [process_mask(component_counts[0])] # 19684  13511
-# masked_entities = [process_mask(x) for x in component_counts if x["name"]=="19684"] # 19684  13511
-masked_entities = [item for item in masked_entities if item is not None]
-pickle.dump(masked_entities, open('mask_components.pkl', 'wb'))
+Parallel(n_jobs=8)(delayed(process_mask)(row) for row in tqdm(component_counts))
+
+
+# masked_entities = Parallel(n_jobs=-1)(delayed(process_mask)(row) for row in tqdm(component_counts))
+# # # masked_entities = [process_mask(component_counts[0])] # 19684  13511
+# # masked_entities = [process_mask(x) for x in component_counts if x["name"]=="19684"] # 19684  13511
+# masked_entities = [item for item in masked_entities if item is not None]
+# pickle.dump(masked_entities, open('mask_components.pkl', 'wb'))
