@@ -157,7 +157,7 @@ def resized_image_to_mask(image_resized, mask_threshold: int = MASK_THRESHOLD):
     return mask
 
 def mask_to_resized_image(mask):
-    image = Image.fromarray((mask * 255).astype(np.uint8), mode='L')
+    image = Image.fromarray((mask * 255).astype(np.uint8), 'L')
     image_resized = resize_image_to_fit_patch(image)
     return image_resized
 
@@ -205,7 +205,6 @@ def load_10_mask_entities(name=None, idxs=None):
         all_mask_entities.append(mask_entities)
     return all_mask_entities
 
-    
 def get_batches(batch_size:int = BATCH_SIZE):
     
     # Files
@@ -216,11 +215,10 @@ def get_batches(batch_size:int = BATCH_SIZE):
     
     i = 0
     while i < len(names):
-        # forged_img_tensors = []
-        all_sims = []
-        ids = []
-        
         forged_imgs = []
+        auth_masks = []
+        forged_masks = []
+        ids = []
         
         batch_files = names[i:i+batch_size]
         
@@ -236,48 +234,38 @@ def get_batches(batch_size:int = BATCH_SIZE):
             forged_img_np = np.array(forged_img_resized)
             forged_imgs.append(forged_img_np)
             
-            # forged_img_tensor = TF.to_tensor(forged_img_resized)
-            # forged_image_normalized_tensor = TF.normalize(forged_img_tensor, \
-            #                             mean=IMAGENET_MEAN, \
-            #                             std=IMAGENET_STD)
-            # forged_img_tensors.append(forged_image_normalized_tensor)
+            combined_auth_mask = []
+            combined_forged_mask = []
             
-            sims = []
             for file in name_files:
+                
+                # Masked entities
                 me = pickle.load(open(file, 'rb'))
                 
                 auth_mask = resize_mask_to_fit_patch(me["auth_mask"])
-                auth_mask = pixel_mask_to_patch_float(auth_mask)
-                auth_mask_tensor = torch.from_numpy(auth_mask) \
-                                        .unsqueeze(0) \
-                                        .permute(1, 2, 0)
-                auth_mask_tensor = auth_mask_tensor.reshape(-1, auth_mask_tensor.shape[-1])
+                # auth_mask = pixel_mask_to_patch_float(auth_mask)
+                combined_auth_mask.append(auth_mask)
                 
                 forged_mask = resize_mask_to_fit_patch(me["forged_mask"])
-                forged_mask = pixel_mask_to_patch_float(forged_mask)
-                forged_mask_tensor = torch.from_numpy(forged_mask) \
-                                        .unsqueeze(0) \
-                                        .permute(1, 2, 0)
-                forged_mask_tensor = forged_mask_tensor.reshape(-1, forged_mask_tensor.shape[-1])
-                
-                # sim = auth_and_forged_sim_mat(auth_mask_tensor, forged_mask_tensor) > 0
-                # sim = auth_and_forged_sim_mat(forged_mask_tensor, auth_mask_tensor) > 0
-                sim = auth_and_forged_sim_mat(forged_mask_tensor, forged_mask_tensor) > 0
-                sims.append(sim)
+                # forged_mask = pixel_mask_to_patch_float(forged_mask)
+                combined_forged_mask.append(forged_mask)
             
-            # # Combine sims by logical or
-            # combined_sim = reduce(lambda x, y: torch.logical_or(x,y), sims).float()
-            # # combined_sim[combined_sim==0] = -1.0
-            # all_sims.append(combined_sim.float())
+            # Combine masks by taking logical OR across entities
+            combined_auth_mask = np.logical_or.reduce(combined_auth_mask)
+            combined_auth_mask = pixel_mask_to_patch_float(combined_auth_mask)
+            auth_masks.append(combined_auth_mask)
             
-        # forged_img_tensors = torch.stack(forged_img_tensors, dim=0)
-        # all_sims_tensor = torch.stack(all_sims, dim=0)
-        
+            combined_forged_mask = np.logical_or.reduce(combined_forged_mask)
+            combined_forged_mask = pixel_mask_to_patch_float(combined_forged_mask)
+            forged_masks.append(combined_forged_mask)
+            
         forged_imgs = np.stack(forged_imgs, axis=0)
+        auth_masks = np.stack(auth_masks, axis=0)
+        forged_masks = np.stack(forged_masks, axis=0)
         
-        # print(forged_img_tensors.shape, all_sims_tensor.shape)
+        yield forged_imgs, auth_masks, forged_masks, ids
         
-        yield forged_img_tensors, all_sims_tensor, ids
+        i += batch_size
 
 
 # %%
@@ -294,10 +282,14 @@ class SegmentationHead(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, hidden_dim, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(hidden_dim)
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(hidden_dim)
+        self.conv3 = nn.Conv2d(hidden_dim, 1, 1)  # Output 1 channel for mask
         
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
-        
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = torch.sigmoid(self.conv3(x))  # Sigmoid for probability mask
         return x
 
 class DINOv3Segmentation(nn.Module):
@@ -328,8 +320,8 @@ class DINOv3Segmentation(nn.Module):
         last_layer_features = features[-1]  # Shape: [B, C, H, W]
         
         # Pass through segmentation head
-        last_layer_features = self.seg_head(last_layer_features)
-        return last_layer_features.permute(0, 2, 3, 1)
+        mask = self.seg_head(last_layer_features)  # Shape: [B, 1, H, W]
+        return mask
 
 # %%
 
@@ -412,13 +404,44 @@ class GramLoss(nn.Module):
 
         return self.mse_loss(student_sim, target_sim)
     
+class TverskyLoss(nn.Module):
+    """Tversky Loss for segmentation, generalization of Dice Loss."""
+    
+    def __init__(self, alpha=0.5, beta=0.5):
+        super().__init__()
+        self.alpha = alpha  # Penalizes false positives
+        self.beta = beta    # Penalizes false negatives
+    
+    def forward(self, pred, target):
+        """
+        Compute Tversky Loss.
+        pred: (B, 1, H, W) or (B, H, W), sigmoid probabilities
+        target: (B, H, W) or (B, 1, H, W), ground truth mask (0 or 1, or float)
+        """
+        if pred.dim() == 4 and pred.shape[1] == 1:
+            pred = pred.squeeze(1)
+        if target.dim() == 4 and target.shape[1] == 1:
+            target = target.squeeze(1)
+        
+        target = target.float()
+        
+        tp = (pred * target).sum(dim=(1, 2))
+        fp = (pred * (1 - target)).sum(dim=(1, 2))
+        fn = ((1 - pred) * target).sum(dim=(1, 2))
+        
+        tversky_index = tp / (tp + self.alpha * fp + self.beta * fn + 1e-6)
+        loss = 1 - tversky_index.mean()
+        return loss
+    
+    
+    
 #  %%
 
 # Training Loop
 
 BATCH_SIZE = 128
 
-gram_loss_fn = GramLoss(apply_norm=True, remove_neg=False)
+tversky_loss_fn = TverskyLoss(alpha=0.7, beta=0.5)
 
 # Create segmentation model
 model = torch.hub.load(
@@ -443,24 +466,21 @@ for epoch in tqdm(range(10)):
     # Zero gradients
     optimizer.zero_grad()
     
-    for img_batch, all_sims, _ in get_batches(batch_size=BATCH_SIZE):
+    for img_batch, auth_masks, forged_masks, _ in get_batches(batch_size=BATCH_SIZE):
         
-        # Get model features
+        img_batch = torch.from_numpy(img_batch).permute(0, 3, 1, 2).float().div(255.0).to(DEVICE)  # (B, 3, H, W)
+        img_batch = TF.normalize(img_batch, mean=IMAGENET_MEAN, std=IMAGENET_STD)
+        forged_masks_tensor = torch.from_numpy(forged_masks).to(DEVICE)  # (B, H, W)
+        
+        # Get model output
         with torch.amp.autocast_mode.autocast(device_type=DEVICE.type, dtype=torch.float):
             
-            seg_output = seg_model(img_batch.to(DEVICE))
-            seg_output = seg_output \
-                            .reshape(seg_output.shape[0], -1, seg_output.shape[-1]) \
-                            .to(DEVICE)
+            seg_output = seg_model(img_batch)  # (B, 1, H, W)
             
-            all_sims = all_sims.to(DEVICE)
-        
+            print(seg_output.shape, forged_masks_tensor.shape)
+            
             # Calculate loss
-            loss = gram_loss_fn(
-                seg_output,
-                all_sims,
-                img_level=True
-            )
+            loss = tversky_loss_fn(seg_output, forged_masks_tensor)
         
             # Backward pass
             loss.backward()
