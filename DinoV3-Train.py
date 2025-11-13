@@ -271,7 +271,7 @@ def get_batches(batch_size:int = BATCH_SIZE):
 # %%
 # Model
 
-MODEL_NAME = MODEL_DINOV3_VITS
+MODEL_NAME = MODEL_DINOV3_VITB #MODEL_DINOV3_VITHP #MODEL_DINOV3_VITS
 N_LAYERS = MODEL_TO_NUM_LAYERS[MODEL_NAME]
 EMBED_DIM = MODEL_TO_EMBED_DIM[MODEL_NAME]
 WEIGHT_FILE = MODEL_TO_WEIGHT_FILE[MODEL_NAME]
@@ -460,7 +460,7 @@ optimizer = torch.optim.AdamW(
     weight_decay=0.05
 )
 
-for epoch in tqdm(range(10)):
+for epoch in tqdm(range(100)):
     total_loss = 0.0
     
     # Zero gradients
