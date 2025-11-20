@@ -271,7 +271,7 @@ def get_batches(batch_size:int = BATCH_SIZE):
 # %%
 # Model
 
-MODEL_NAME = MODEL_DINOV3_VITB # MODEL_DINOV3_VITHP # MODEL_DINOV3_VITS
+MODEL_NAME = MODEL_DINOV3_VITS # MODEL_DINOV3_VITB # MODEL_DINOV3_VITHP # MODEL_DINOV3_VITS
 N_LAYERS = MODEL_TO_NUM_LAYERS[MODEL_NAME]
 EMBED_DIM = MODEL_TO_EMBED_DIM[MODEL_NAME]
 WEIGHT_FILE = MODEL_TO_WEIGHT_FILE[MODEL_NAME]
@@ -282,14 +282,11 @@ class SegmentationHead(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, hidden_dim, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(hidden_dim)
-        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(hidden_dim)
-        self.conv3 = nn.Conv2d(hidden_dim, 1, 1)  # Output 1 channel for mask
+        self.conv2 = nn.Conv2d(hidden_dim, 1, 1)  # Output 1 channel for mask
         
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = torch.sigmoid(self.conv3(x))  # Sigmoid for probability mask
+        x = torch.sigmoid(self.conv2(x))  # Sigmoid for probability mask
         return x
 
 class DINOv3Segmentation(nn.Module):
@@ -434,64 +431,137 @@ class TverskyLoss(nn.Module):
         return loss
     
     
+#  %%
+
+# training_images = {x.split(os.sep)[-1].split('_')[0] for x in glob(os.path.join("mask_entities", '*.pkl'))}
+# test_images = {x.split(os.sep)[-1].split('.')[0] for x in glob(os.path.join(forged_folder, '*.png'))}
+# test_images = {x for x in test_images if x not in training_images}
+# print(len(test_images), len(training_images))
+    
     
 #  %%
 
-# Training Loop
-
-BATCH_SIZE = 128
-
-tversky_loss_fn = TverskyLoss(alpha=0.7, beta=0.5)
-
-# Create segmentation model
-model = torch.hub.load(
-    repo_or_dir=dinov3_repo_dir,
-    model=MODEL_NAME,
-    source="local",
-    weights=WEIGHT_FILE,
-)
-seg_model = DINOv3Segmentation(model, in_channels=EMBED_DIM).to(DEVICE)
-seg_model.train()
-
-# # Create optimizer for segmentation head only
-optimizer = torch.optim.AdamW(
-    seg_model.seg_head.parameters(),  # Only optimize segmentation head
-    lr=1e-4,
-    weight_decay=0.05
-)
-
-for epoch in tqdm(range(100)):
-    total_loss = 0.0
+checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_S_FT.pth')
+            
+if __name__ == "__main__":
     
-    # Zero gradients
-    optimizer.zero_grad()
+    BATCH_SIZE = 128
+
+    tversky_loss_fn = TverskyLoss(alpha=0.7, beta=0.5)
+
+    # Create segmentation model
+    model = torch.hub.load(
+        repo_or_dir=dinov3_repo_dir,
+        model=MODEL_NAME,
+        source="local",
+        weights=WEIGHT_FILE,
+    )
+    seg_model = DINOv3Segmentation(model, in_channels=EMBED_DIM).to(DEVICE)
+    seg_model.train()
+
+    # # Create optimizer for segmentation head only
+    optimizer = torch.optim.AdamW(
+        seg_model.seg_head.parameters(),  # Only optimize segmentation head
+        lr=1e-4,
+        weight_decay=0.05
+    )
     
-    for img_batch, auth_masks, forged_masks, _ in get_batches(batch_size=BATCH_SIZE):
+    # # Create optimizer for segmentation head only
+    # optimizer = torch.optim.AdamW(
+    #     seg_model.parameters(),  # Only optimize segmentation head
+    #     lr=1e-4,
+    #     weight_decay=0.05
+    # )
+
+    # Load checkpoint if exists
+    start_epoch = 0
+    best_val_loss = float('inf')
+    best_model_state = None
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+        seg_model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        if 'val_loss' in checkpoint:
+            best_val_loss = checkpoint['val_loss']
+            best_model_state = checkpoint['model_state_dict'].copy()
+        print(f"Resumed training from epoch {start_epoch}, best val loss: {best_val_loss:.4f}")
+    else:
+        print("Starting training from scratch")
+
+    # Get validation batch (first batch)
+    validation_batch = None
+    for batch in get_batches(batch_size=BATCH_SIZE):
+        validation_batch = batch
+        break
+
+    if validation_batch is None:
+        raise ValueError("No batches available for training/validation")
+
+    # Early stopping parameters
+    patience = 5
+    epochs_without_improvement = 0
+
+    for epoch in tqdm(range(start_epoch, 200)):
+        total_loss = 0.0
         
-        img_batch = torch.from_numpy(img_batch).permute(0, 3, 1, 2).float().div(255.0).to(DEVICE)  # (B, 3, H, W)
-        img_batch = TF.normalize(img_batch, mean=IMAGENET_MEAN, std=IMAGENET_STD)
-        forged_masks_tensor = torch.from_numpy(forged_masks).to(DEVICE)  # (B, H, W)
+        # Zero gradients
+        optimizer.zero_grad()
         
-        # Get model output
-        with torch.amp.autocast_mode.autocast(device_type=DEVICE.type, dtype=torch.float):
+        # Training
+        for img_batch, auth_masks, forged_masks, _ in get_batches(batch_size=BATCH_SIZE):
+            # Skip the validation batch
+            if np.array_equal(img_batch, validation_batch[0]):
+                continue
             
-            seg_output = seg_model(img_batch)  # (B, 1, H, W)
+            img_batch = torch.from_numpy(img_batch).permute(0, 3, 1, 2).float().div(255.0).to(DEVICE)  # (B, 3, H, W)
+            img_batch = TF.normalize(img_batch, mean=IMAGENET_MEAN, std=IMAGENET_STD)
+            forged_masks_tensor = torch.from_numpy(forged_masks).to(DEVICE)  # (B, H, W)
             
-            print(seg_output.shape, forged_masks_tensor.shape)
+            # Get model output
+            with torch.amp.autocast_mode.autocast(device_type=DEVICE.type, dtype=torch.float):
+                
+                seg_output = seg_model(img_batch)  # (B, 1, H, W)
+                
+                # Calculate loss
+                loss = tversky_loss_fn(seg_output, forged_masks_tensor)
             
-            # Calculate loss
-            loss = tversky_loss_fn(seg_output, forged_masks_tensor)
+                # Backward pass
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
         
-            # Backward pass
-            loss.backward()
-            optimizer.step()
+        # Validation
+        seg_model.eval()
+        with torch.no_grad():
+            val_img_batch, val_auth_masks, val_forged_masks, _ = validation_batch
+            val_img_batch = torch.from_numpy(val_img_batch).permute(0, 3, 1, 2).float().div(255.0).to(DEVICE)
+            val_img_batch = TF.normalize(val_img_batch, mean=IMAGENET_MEAN, std=IMAGENET_STD)
+            val_forged_masks_tensor = torch.from_numpy(val_forged_masks).to(DEVICE)
             
-            print(f'Epoch {epoch}, Loss: {loss.item()}')
+            val_seg_output = seg_model(val_img_batch)
+            val_loss = tversky_loss_fn(val_seg_output, val_forged_masks_tensor).item()
         
-        # Update progress
-        total_loss += loss.item()
+        seg_model.train()
         
-        # Save model checkpoint with training info
+        print(f'Epoch {epoch}, Train Loss: {total_loss:.4f}, Val Loss: {val_loss:.4f}')
+        
+        # Early stopping check
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+            best_model_state = seg_model.state_dict().copy()
+            print(f"New best validation loss: {best_val_loss:.4f}")
+        else:
+            epochs_without_improvement += 1
+            print(f"No improvement for {epochs_without_improvement} epochs")
+        
+        if epochs_without_improvement >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
+        
+        # Save current model (optional, or save best)
         checkpoint = {
             'model_state_dict': seg_model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -500,14 +570,26 @@ for epoch in tqdm(range(100)):
             'embed_dim': EMBED_DIM,
             'epoch': epoch,
             'total_loss': total_loss,
+            'val_loss': val_loss,
         }
 
         # Create checkpoints directory if it doesn't exist 
         os.makedirs('checkpoints', exist_ok=True)
 
         # Save checkpoint
-        checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_peft.pth')
         torch.save(checkpoint, checkpoint_path)
 
         print(f"Model checkpoint saved to {checkpoint_path}")
-# %%
+
+    # Save best model
+    if best_model_state is not None:
+        best_checkpoint = {
+            'model_state_dict': best_model_state,
+            'model_name': MODEL_NAME,
+            'num_layers': N_LAYERS,
+            'embed_dim': EMBED_DIM,
+            'best_val_loss': best_val_loss,
+        }
+        best_checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_best.pth')
+        torch.save(best_checkpoint, best_checkpoint_path)
+        print(f"Best model saved to {best_checkpoint_path}")
