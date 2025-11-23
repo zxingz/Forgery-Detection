@@ -32,66 +32,18 @@ import torchvision.transforms.functional as TF
 
 sys.path.insert(0, os.getcwd())
 
-# import all utils
-from utils import data_directory, \
-                dinov3_repo_dir, \
-                dinov3_vitb16_weight_raw, \
-                dinov3_vith16_weight_raw, \
-                dinov3_vit7B16_weight_raw, \
-                dinov3_vits16_weight_raw
-                
-sys.path.insert(0, os.path.join(dinov3_repo_dir))
+from config import Config
+
+#  %%
+config = Config(data_directory=r"D:\RecodAI\recodai-luc-scientific-image-forgery-detection")
 
 #  %%
 
-forged_folder = os.path.join(data_directory, 'train_images', 'forged')
-authentic_folder = os.path.join(data_directory, 'train_images', 'authentic')
-mask_folder = os.path.join(data_directory, 'train_masks')
+forged_folder = os.path.join(config.data_directory, 'train_images', 'forged')
+authentic_folder = os.path.join(config.data_directory, 'train_images', 'authentic')
+mask_folder = os.path.join(config.data_directory, 'train_masks')
 
-# Image Setting
-PATCH_SIZE = 16
-DEFAULT_IMAGE_SIZE = 512 # Should be multiple of PATCH_SIZE
-MASK_THRESHOLD = 0
 
-# Batch Settings
-BATCH_SIZE = 8
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
-# Device
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Available DINOv3 models:
-MODEL_DINOV3_VITS = "dinov3_vits16"
-MODEL_DINOV3_VITSP = "dinov3_vits16plus"
-MODEL_DINOV3_VITB = "dinov3_vitb16"
-MODEL_DINOV3_VITL = "dinov3_vitl16"
-MODEL_DINOV3_VITHP = "dinov3_vith16plus"
-MODEL_DINOV3_VIT7B = "dinov3_vit7b16"
-
-MODEL_TO_NUM_LAYERS = {
-    MODEL_DINOV3_VITS: 12,
-    MODEL_DINOV3_VITSP: 12,
-    MODEL_DINOV3_VITB: 12,
-    MODEL_DINOV3_VITL: 24,
-    MODEL_DINOV3_VITHP: 32,
-    MODEL_DINOV3_VIT7B: 40,
-}
-
-MODEL_TO_EMBED_DIM = {
-    MODEL_DINOV3_VITS: 384,
-    MODEL_DINOV3_VITSP: 384,  # ViT-Small+
-    MODEL_DINOV3_VITB: 768,
-    MODEL_DINOV3_VITL: 1024,
-    MODEL_DINOV3_VITHP: 1536, # ViT-Huge+
-    MODEL_DINOV3_VIT7B: 4096,
-}
-
-MODEL_TO_WEIGHT_FILE = {
-    MODEL_DINOV3_VITS: dinov3_vits16_weight_raw,
-    MODEL_DINOV3_VITB: dinov3_vitb16_weight_raw,
-    MODEL_DINOV3_VITHP: dinov3_vith16_weight_raw, # ViT-Huge+
-}
 
 def count_components_floodfill(row:dict, connectivity: int = 8):
     """
@@ -142,16 +94,15 @@ def count_components_floodfill(row:dict, connectivity: int = 8):
 
 def resize_image_to_fit_patch(
     image: Image,
-    image_size: int = DEFAULT_IMAGE_SIZE,
-    patch_size: int = PATCH_SIZE,
+    image_size: int = config.DINOV3_DEFAULT_IMAGE_SIZE,
+    patch_size: int = config.DINOV3_PATCH_SIZE,
 ) -> Image:
-    w, h = image.size
-    w_hat = h_hat = PATCH_SIZE * (image_size // PATCH_SIZE)
+    w_hat = h_hat = patch_size * (image_size // patch_size)
     resized_img = image.resize((w_hat, h_hat), \
                     resample=Image.Resampling.LANCZOS)
     return resized_img
 
-def resized_image_to_mask(image_resized, mask_threshold: int = MASK_THRESHOLD):
+def resized_image_to_mask(image_resized, mask_threshold: int = config.DINOV3_MASK_THRESHOLD):
     image_array = np.array(image_resized)
     mask = image_array > mask_threshold
     return mask
@@ -163,18 +114,17 @@ def mask_to_resized_image(mask):
 
 def resize_mask_to_fit_patch(
     mask: np.ndarray,
-    mask_threshold: int = MASK_THRESHOLD,
 ) -> np.ndarray:
     resized_image = mask_to_resized_image(mask)
     return resized_image_to_mask(resized_image)
 
-def pixel_to_patch_coords(y_pixel, x_pixel, patch_size=PATCH_SIZE):
+def pixel_to_patch_coords(y_pixel, x_pixel, patch_size=config.DINOV3_PATCH_SIZE):
     y_coord = y_pixel // patch_size
     x_coord = x_pixel // patch_size
     return y_coord, x_coord
 
 # Convert auth_mask to patch coordinates and mask the similarity map
-def pixel_mask_to_patch_float(pixel_mask, patch_size=PATCH_SIZE):
+def pixel_mask_to_patch_float(pixel_mask, patch_size=config.DINOV3_PATCH_SIZE):
     """Convert pixel-level mask to patch-level mask"""
     H_pixels, W_pixels = pixel_mask.shape
     H_patches = H_pixels // patch_size
@@ -205,7 +155,7 @@ def load_10_mask_entities(name=None, idxs=None):
         all_mask_entities.append(mask_entities)
     return all_mask_entities
 
-def get_batches(batch_size:int = BATCH_SIZE):
+def get_batches(batch_size:int=config.DINOV3_BATCH_SIZE):
     
     # Files
     files = glob(os.path.join("mask_entities", '*.pkl'))
@@ -271,10 +221,10 @@ def get_batches(batch_size:int = BATCH_SIZE):
 # %%
 # Model
 
-MODEL_NAME = MODEL_DINOV3_VITS # MODEL_DINOV3_VITB # MODEL_DINOV3_VITHP # MODEL_DINOV3_VITS
-N_LAYERS = MODEL_TO_NUM_LAYERS[MODEL_NAME]
-EMBED_DIM = MODEL_TO_EMBED_DIM[MODEL_NAME]
-WEIGHT_FILE = MODEL_TO_WEIGHT_FILE[MODEL_NAME]
+MODEL_NAME = config.DINOV3_MODEL_NAME
+N_LAYERS = config.DINOV3_N_LAYERS
+EMBED_DIM =config.DINOV3_EMBED_DIM
+WEIGHT_FILE = config.DINOV3_WEIGHT_FILE
 
 #  %%
 class SegmentationHead(nn.Module):
@@ -351,34 +301,28 @@ class TverskyLoss(nn.Module):
         tversky_index = tp / (tp + self.alpha * fp + self.beta * fn + 1e-6)
         loss = 1 - tversky_index.mean()
         return loss
-    
-    
-#  %%
 
-# training_images = {x.split(os.sep)[-1].split('_')[0] for x in glob(os.path.join("mask_entities", '*.pkl'))}
-# test_images = {x.split(os.sep)[-1].split('.')[0] for x in glob(os.path.join(forged_folder, '*.png'))}
-# test_images = {x for x in test_images if x not in training_images}
-# print(len(test_images), len(training_images))
-    
     
 #  %%
 
 checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_S_FT.pth')
+
+tversky_loss_fn = TverskyLoss(alpha=0.7, beta=0.5)
+
+# Create segmentation model
+model = torch.hub.load(
+    repo_or_dir=config.dinov3_repo_dir,
+    model=MODEL_NAME,
+    source="local",
+    weights=WEIGHT_FILE,
+)
+seg_model = DINOv3Segmentation(model, in_channels=EMBED_DIM).to(config.DINOV3_DEVICE)
             
 if __name__ == "__main__":
     
+    # Override batch size for training
     BATCH_SIZE = 128
 
-    tversky_loss_fn = TverskyLoss(alpha=0.7, beta=0.5)
-
-    # Create segmentation model
-    model = torch.hub.load(
-        repo_or_dir=dinov3_repo_dir,
-        model=MODEL_NAME,
-        source="local",
-        weights=WEIGHT_FILE,
-    )
-    seg_model = DINOv3Segmentation(model, in_channels=EMBED_DIM).to(DEVICE)
     seg_model.train()
 
     # # Create optimizer for segmentation head only
@@ -393,7 +337,7 @@ if __name__ == "__main__":
     best_val_loss = float('inf')
     best_model_state = None
     if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+        checkpoint = torch.load(checkpoint_path, map_location=config.DINOV3_DEVICE)
         seg_model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint.get('epoch', 0) + 1
@@ -429,12 +373,12 @@ if __name__ == "__main__":
             if np.array_equal(img_batch, validation_batch[0]):
                 continue
             
-            img_batch = torch.from_numpy(img_batch).permute(0, 3, 1, 2).float().div(255.0).to(DEVICE)  # (B, 3, H, W)
-            img_batch = TF.normalize(img_batch, mean=IMAGENET_MEAN, std=IMAGENET_STD)
-            forged_masks_tensor = torch.from_numpy(forged_masks).to(DEVICE)  # (B, H, W)
+            img_batch = torch.from_numpy(img_batch).permute(0, 3, 1, 2).float().div(255.0).to(config.DINOV3_DEVICE)  # (B, 3, H, W)
+            img_batch = TF.normalize(img_batch, mean=config.DINOV3_IMAGENET_MEAN, std=config.DINOV3_IMAGENET_STD)
+            forged_masks_tensor = torch.from_numpy(forged_masks).to(config.DINOV3_DEVICE)  # (B, H, W)
             
             # Get model output
-            with torch.amp.autocast_mode.autocast(device_type=DEVICE.type, dtype=torch.float):
+            with torch.amp.autocast_mode.autocast(device_type=config.DINOV3_DEVICE.type, dtype=torch.float):
                 
                 seg_output = seg_model(img_batch)  # (B, 1, H, W)
                 
@@ -451,9 +395,9 @@ if __name__ == "__main__":
         seg_model.eval()
         with torch.no_grad():
             val_img_batch, val_auth_masks, val_forged_masks, _ = validation_batch
-            val_img_batch = torch.from_numpy(val_img_batch).permute(0, 3, 1, 2).float().div(255.0).to(DEVICE)
-            val_img_batch = TF.normalize(val_img_batch, mean=IMAGENET_MEAN, std=IMAGENET_STD)
-            val_forged_masks_tensor = torch.from_numpy(val_forged_masks).to(DEVICE)
+            val_img_batch = torch.from_numpy(val_img_batch).permute(0, 3, 1, 2).float().div(255.0).to(config.DINOV3_DEVICE)  # (B, 3, H, W)
+            val_img_batch = TF.normalize(val_img_batch, mean=config.DINOV3_IMAGENET_MEAN, std=config.DINOV3_IMAGENET_STD)
+            val_forged_masks_tensor = torch.from_numpy(val_forged_masks).to(config.DINOV3_DEVICE)
             
             val_seg_output = seg_model(val_img_batch)
             val_loss = tversky_loss_fn(val_seg_output, val_forged_masks_tensor).item()
@@ -508,3 +452,4 @@ if __name__ == "__main__":
         best_checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_best.pth')
         torch.save(best_checkpoint, best_checkpoint_path)
         print(f"Best model saved to {best_checkpoint_path}")
+# %%
