@@ -10,6 +10,7 @@ __pycache__/
 mask_entities/
 .pkl
 weights/
+weights_backup/
 repos/
 .Python
 build/

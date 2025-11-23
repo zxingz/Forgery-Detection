@@ -105,6 +105,9 @@ def find_objects_with_sift(extracted_objects, image):
             src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
             dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
             M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            if M is None or M.shape != (3, 3):
+                results[bbox] = None
+                continue
             # Compute bounding box in image
             h, w = obj.shape[:2]
             corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2)
@@ -337,6 +340,7 @@ def score(solution: pd.DataFrame, submission: pd.DataFrame, row_id_column_name: 
     )
     return float(np.mean(df['image_score']))
 
+
 sys.path.insert(0, os.getcwd())
 
 # import all utils
@@ -549,7 +553,7 @@ else:
 
 # Example usage
 
-idx = 789
+idx = 789 # 13 #789
 
 forged_paths = glob(os.path.join(forged_folder, '*.png'))
 forged_img = Image.open(forged_paths[idx]).convert('RGB')

@@ -50,7 +50,7 @@ mask_folder = os.path.join(data_directory, 'train_masks')
 
 # Image Setting
 PATCH_SIZE = 16
-DEFAULT_IMAGE_SIZE = 512 # Should be multiple of PATCH_SIZE
+DEFAULT_IMAGE_SIZE = 1024 # Should be multiple of PATCH_SIZE
 MASK_THRESHOLD = 0
 
 # Batch Settings
@@ -271,22 +271,27 @@ def get_batches(batch_size:int = BATCH_SIZE):
 # %%
 # Model
 
-MODEL_NAME = MODEL_DINOV3_VITS # MODEL_DINOV3_VITB # MODEL_DINOV3_VITHP # MODEL_DINOV3_VITS
+MODEL_NAME = MODEL_DINOV3_VITB # MODEL_DINOV3_VITS # MODEL_DINOV3_VITB # MODEL_DINOV3_VITHP # MODEL_DINOV3_VITS
 N_LAYERS = MODEL_TO_NUM_LAYERS[MODEL_NAME]
 EMBED_DIM = MODEL_TO_EMBED_DIM[MODEL_NAME]
 WEIGHT_FILE = MODEL_TO_WEIGHT_FILE[MODEL_NAME]
 
 #  %%
 class SegmentationHead(nn.Module):
-    def __init__(self, in_channels, hidden_dim=EMBED_DIM):
+    def __init__(self, in_channels, hidden_dim=EMBED_DIM, dropout_rate=0.1):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, hidden_dim, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(hidden_dim)
-        self.conv2 = nn.Conv2d(hidden_dim, 1, 1)  # Output 1 channel for mask
+        self.conv2 = nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(hidden_dim)
+        self.dropout = nn.Dropout2d(dropout_rate)  # Spatial dropout for regularization
+        self.conv3 = nn.Conv2d(hidden_dim, 1, 1)  # Output 1 channel for mask
         
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
-        x = torch.sigmoid(self.conv2(x))  # Sigmoid for probability mask
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.dropout(x)
+        x = torch.sigmoid(self.conv3(x))  # Sigmoid for probability mask
         return x
 
 class DINOv3Segmentation(nn.Module):
@@ -322,7 +327,7 @@ class DINOv3Segmentation(nn.Module):
 
 # %%
 
-# Loss Function 
+# Loss Function
 class TverskyLoss(nn.Module):
     """Tversky Loss for segmentation, generalization of Dice Loss."""
     
@@ -363,11 +368,11 @@ class TverskyLoss(nn.Module):
     
 #  %%
 
-checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_S_FT.pth')
+checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_S_FT3.pth')
             
 if __name__ == "__main__":
     
-    BATCH_SIZE = 128
+    BATCH_SIZE = 16
 
     tversky_loss_fn = TverskyLoss(alpha=0.7, beta=0.5)
 
@@ -387,6 +392,13 @@ if __name__ == "__main__":
         lr=1e-4,
         weight_decay=0.05
     )
+    
+    # # Create optimizer for segmentation head only
+    # optimizer = torch.optim.AdamW(
+    #     seg_model.parameters(),  # Only optimize segmentation head
+    #     lr=1e-4,
+    #     weight_decay=0.05
+    # )
 
     # Load checkpoint if exists
     start_epoch = 0
@@ -508,3 +520,4 @@ if __name__ == "__main__":
         best_checkpoint_path = os.path.join('weights', f'{MODEL_NAME}_dinov3_best.pth')
         torch.save(best_checkpoint, best_checkpoint_path)
         print(f"Best model saved to {best_checkpoint_path}")
+# %%
