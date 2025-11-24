@@ -5,7 +5,7 @@ This repository contains an end‑to‑end experimental pipeline for detecting a
 1. Patch‑level segmentation using a frozen DINOv3 Vision Transformer backbone with a lightweight trainable segmentation head (Tversky loss).
 2. Prompt‑tuned SAM3 (Segment Anything Model v3) via CoOp‑style learnable context tokens injected into the text encoder for forgery region localization.
 
-The current state represents a research prototype; metrics are preliminary (mAP 0.0714 across IoU thresholds 0.30–0.95) and several improvement avenues are outlined below.
+The current state represents a research prototype; metrics are preliminary (mAP 0.314 across IoU thresholds 0.30–0.95) and several improvement avenues are outlined below.
 
 ---
 ## 1. Competition Overview (Paraphrased)
@@ -94,7 +94,7 @@ This approach drastically reduces trainable parameters and enables rapid experim
 - Visual overlays: bounding boxes around candidate original vs found duplicates (SIFT feature matching demonstration) and mask visualization.
 - Component extraction counts (e.g., "Extracted 3 objects ... Found 2 objects using SIFT").
 - Example predicted masks for sample IDs (e.g., `10030`).
-- Evaluation: Computed mAP = 0.0714. Per IoU threshold AP values:
+- Evaluation: Computed mAP = 0.0314. Per IoU threshold AP values:
 	- 0.30–0.75: 0.10
 	- 0.80–0.95: 0.00
 
@@ -168,7 +168,7 @@ The custom mAP spans IoU thresholds from 0.30 to 0.95 at granularity 0.05. Low A
 ## 11. Current Results Snapshot
 | Metric | Value |
 |--------|-------|
-| mAP (0.30–0.95) | 0.0714 |
+| mAP (0.30–0.95) | 0.314 |
 | AP (0.30–0.75)  | 0.10   |
 | AP (0.80–0.95)  | 0.00   |
 
