@@ -27,7 +27,7 @@ Top‑level files:
 - `DinoV3_Infer.ipynb` inference & analysis notebook (sample visualization, object extraction, metric computation).
 - `masker.py` (entity/mask utilities; not expanded here).
 - `mask_entities/` serialized per‑image entity masks (`*.pkl`) produced during preprocessing.
-- `weights/` and `weights_backup/` pretrained DINOv3 weights and fine‑tuned checkpoints.
+- `weights/` and `weights_backup/` pretrained DINOv3 weights and fine‑tuned checkpoints. URL[https://drive.google.com/drive/folders/1oinGdSZY97qKhNXp04ywMw4jkUrdGsta?usp=drive_link]
 - `repos/` embedded source copies of `dinov3`, `sam3`, and `transformers` (local hub loading & potential modifications).
 
 Dataset (expected external path defined in `Config`):
