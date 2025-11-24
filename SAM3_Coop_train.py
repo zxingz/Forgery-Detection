@@ -30,7 +30,7 @@ sys.path.insert(0, os.getcwd())
 
 from config import Config
 config = Config(data_directory=r"D:\RecodAI\recodai-luc-scientific-image-forgery-detection")
-config.DINOV3_DEVICE = torch.device('cpu')
+# config.DINOV3_DEVICE = torch.device('cpu')
 
 
 from DinoV3_Train import resize_image_to_fit_patch, resize_mask_to_fit_patch, pixel_mask_to_patch_float
@@ -115,11 +115,11 @@ sam3_model = inject_coop_into_sam3(sam3_model, n_ctx=16)
 
 #  %%
 
-BATCH_SIZE = 2
+BATCH_SIZE = 16
 num_epochs=5
 lr=1e-4
 weight_decay=0.01
-text_prompt=""
+text_prompt="detect forged regions in the image"
 save_every=1
 
 class TverskyLoss(nn.Module):
@@ -283,73 +283,3 @@ for epoch in range(num_epochs):
         print(f"Saved checkpoint to {ckpt_path}")
 
 print("Training complete.")
-
-
-
-
-#  %%
-# Load image
-image_url = "http://images.cocodataset.org/val2017/000000077595.jpg"
-image = Image.open(requests.get(image_url, stream=True).raw).convert("RGB")
-
-#  %%
-image.size
-
-#  %%
-# Segment using text prompt
-inputs = sam3_processor(images=image, text="ear", return_tensors="pt").to(config.DINOV3_DEVICE)
-
-print(list(inputs.keys()))
-print(inputs["pixel_values"].shape)
-
-#  %%
-with torch.no_grad():
-    outputs = sam3_model(**inputs, return_dict=True)
-
-# Post-process results
-results = sam3_processor.post_process_instance_segmentation(
-    outputs,
-    threshold=0.5,
-    mask_threshold=0.5,
-    target_sizes=inputs.get("original_sizes").tolist()
-)[0]
-
-print(f"Found {len(results['masks'])} objects")
-# Results contain:
-# - masks: Binary masks resized to original image size
-# - boxes: Bounding boxes in absolute pixel coordinates (xyxy format)
-# - scores: Confidence scores
-
-# %%
-outputs.pred_masks[:, 0, :, :].shape
-
-
-# %%
-plt.imshow(image)
-plt.title(f'OG')
-plt.axis('off')
-plt.show()
-
-outputs.pred_masks.squeeze(1).shape
-
-
-#  %%
-results["masks"][1, :, :].detach().cpu().numpy()
-
-# %%
-# Training setup
-
-
-
-import numpy as np
-
-
-
-# %%
-
-fr, aum, frm, ids = next(get_batches())
-
-
-#  %%
-
-fr[0].size, aum[0].shape, frm[0].shape
