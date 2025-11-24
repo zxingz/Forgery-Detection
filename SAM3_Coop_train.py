@@ -30,6 +30,7 @@ sys.path.insert(0, os.getcwd())
 
 from config import Config
 config = Config(data_directory=r"D:\RecodAI\recodai-luc-scientific-image-forgery-detection")
+config.DINOV3_DEVICE = torch.device('cpu')
 
 
 from DinoV3_Train import resize_image_to_fit_patch, resize_mask_to_fit_patch, pixel_mask_to_patch_float
@@ -40,33 +41,23 @@ sam3_model = Sam3Model.from_pretrained("facebook/sam3").to(config.DINOV3_DEVICE)
 sam3_processor = Sam3Processor.from_pretrained("facebook/sam3")
 
 # %%
+
 class CLIPTextEmbeddings(nn.Module):
     def __init__(self, config: CLIPTextConfig, n_ctx=16, ctx_init=None):
         super().__init__()
-        embed_dim = config.hidden_size
-
-        self.token_embedding = nn.Embedding(config.vocab_size, embed_dim)
-        self.position_embedding = nn.Embedding(config.max_position_embeddings, embed_dim)
-
-        # position_ids (1, len position emb) is contiguous in memory and exported when serialized
-        self.register_buffer(
-            "position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False
-        )
-        
-        # CoOp: Context Optimization - Trainable prompt tokens
         self.n_ctx = n_ctx
+        self.embed_dim = config.hidden_size
+        self.token_embedding = nn.Embedding(config.vocab_size, self.embed_dim)
+        self.position_embedding = nn.Embedding(config.max_position_embeddings, self.embed_dim)
+
         if ctx_init:
-            # Initialize from given text
             ctx_init = ctx_init.replace("_", " ")
-            n_ctx = len(ctx_init.split(" "))
-            prompt = self.token_embedding(torch.tensor([self.tokenize(ctx_init)]))
-            self.ctx = nn.Parameter(prompt)
-            self.n_ctx = n_ctx
-        else:
-            # Random initialization
-            ctx_vectors = torch.empty(n_ctx, embed_dim)
-            nn.init.normal_(ctx_vectors, std=0.02)
-            self.ctx = nn.Parameter(ctx_vectors)
+            init_tokens = ctx_init.split()
+            self.n_ctx = min(len(init_tokens), n_ctx)
+        # Learned context vectors
+        ctx_vectors = torch.empty(self.n_ctx, self.embed_dim)
+        nn.init.normal_(ctx_vectors, std=0.02)
+        self.ctx = nn.Parameter(ctx_vectors)
 
     def forward(
         self,
@@ -74,73 +65,49 @@ class CLIPTextEmbeddings(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
-        seq_length = input_ids.shape[-1] if input_ids is not None else inputs_embeds.shape[-2]
-        max_position_embedding = self.position_embedding.weight.shape[0]
-
-        if seq_length > max_position_embedding:
-            raise ValueError(
-                f"Sequence length must be less than max_position_embeddings (got `sequence length`: "
-                f"{seq_length} and max_position_embeddings: {max_position_embedding}"
-            )
-
-        if position_ids is None:
-            position_ids = self.position_ids[:, :seq_length]
-
         if inputs_embeds is None:
-            inputs_embeds = self.token_embedding(input_ids)
-        
-        # Inject trainable context at the beginning
-        batch_size = inputs_embeds.shape[0]
-        ctx = self.ctx.unsqueeze(0).expand(batch_size, -1, -1)  # (B, n_ctx, embed_dim)
-        inputs_embeds = torch.cat([ctx, inputs_embeds], dim=1)  # Prepend context
-        
-        # Adjust position embeddings for the expanded sequence
-        extended_seq_length = inputs_embeds.shape[1]
-        extended_position_ids = torch.arange(extended_seq_length, device=inputs_embeds.device).unsqueeze(0)
-        position_embeddings = self.position_embedding(extended_position_ids)
-        
-        embeddings = inputs_embeds + position_embeddings
+            if input_ids is None:
+                raise ValueError("Either input_ids or inputs_embeds must be provided.")
+            inputs_embeds = self.token_embedding(input_ids)  # (B, L, D)
 
-        return embeddings
+        B, L, D = inputs_embeds.shape
+        # Replace first n_ctx token embeddings (prefix injection)
+        prefix_len = min(self.n_ctx, L)
+        if prefix_len > 0:
+            # Broadcast learned context to batch and overwrite
+            inputs_embeds = inputs_embeds.clone()
+            inputs_embeds[:, :prefix_len, :] = self.ctx[:prefix_len].unsqueeze(0).expand(B, -1, -1)
+
+        # Position embeddings (standard)
+        if position_ids is None:
+            position_ids = torch.arange(L, device=inputs_embeds.device).unsqueeze(0)  # (1, L)
+        pos_embeds = self.position_embedding(position_ids)
+        return inputs_embeds + pos_embeds
 
 # %%
 # Inject CoOp trainable prompts into SAM3 text encoder
 def inject_coop_into_sam3(model, n_ctx=16, ctx_init=None):
-    """
-    Inject CoOp (Context Optimization) into SAM3's text encoder
-    
-    Args:
-        model: Sam3Model instance
-        n_ctx: Number of context tokens (default: 16)
-        ctx_init: Optional initialization string for context
-    """
-    # Access the text encoder's embeddings
     text_model = model.text_encoder.text_model
-    original_config = text_model.embeddings.token_embedding.weight.shape
-    
-    # Create new CoOp embeddings with the same config
-    config = text_model.config
-    coop_embeddings = CLIPTextEmbeddings(config, n_ctx=n_ctx, ctx_init=ctx_init)
-    
-    # Copy weights from original embeddings
-    coop_embeddings.token_embedding.weight.data = text_model.embeddings.token_embedding.weight.data.clone()
-    coop_embeddings.position_embedding.weight.data = text_model.embeddings.position_embedding.weight.data.clone()
-    
-    # Replace the embeddings layer
-    text_model.embeddings = coop_embeddings.to(device)
-    
-    # Freeze all parameters except the context tokens
-    for name, param in model.named_parameters():
-        param.requires_grad = False
-    
-    # Only train the context tokens
-    for param in text_model.embeddings.ctx:
-        param.requires_grad = True
-    
-    print(f"Injected CoOp with {n_ctx} trainable context tokens")
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable parameters: {trainable_params:,}")
-    
+    clip_cfg = text_model.config
+    coop_embeddings = CLIPTextEmbeddings(clip_cfg, n_ctx=n_ctx, ctx_init=ctx_init)
+
+    # Copy original weights
+    coop_embeddings.token_embedding.weight.data.copy_(
+        text_model.embeddings.token_embedding.weight.data
+    )
+    coop_embeddings.position_embedding.weight.data.copy_(
+        text_model.embeddings.position_embedding.weight.data
+    )
+
+    # Replace
+    text_model.embeddings = coop_embeddings.to(model.device)
+
+    # Freeze everything then unfreeze context
+    for p in model.parameters():
+        p.requires_grad = False
+    text_model.embeddings.ctx.requires_grad_(True)
+
+    print(f"Injected CoOp prefix (n_ctx={coop_embeddings.n_ctx}) without changing sequence length.")
     return model
 
 # Inject CoOp into the model
@@ -152,7 +119,7 @@ BATCH_SIZE = 2
 num_epochs=5
 lr=1e-4
 weight_decay=0.01
-text_prompt="detect forged image which could be copy and pasted"
+text_prompt=""
 save_every=1
 
 class TverskyLoss(nn.Module):
@@ -244,7 +211,13 @@ checkpoint_dir = os.path.join('weights')
 tversky_loss_fn = TverskyLoss(alpha=0.7, beta=0.5)
     
 # Only train parameters that require grad (CoOp context tokens)
-trainable_params = [p for p in sam3_model.parameters() if p.requires_grad]
+ctx_param = sam3_model.text_encoder.text_model.embeddings.ctx
+ctx_param.requires_grad_(True)
+
+# Use the Parameter itself (leaf) for optimization
+trainable_params = [ctx_param]
+
+
 if len(trainable_params) == 0:
     raise RuntimeError("No trainable parameters found (context tokens may not be marked requires_grad).")
 
@@ -280,9 +253,13 @@ for epoch in range(num_epochs):
             align_corners=False
         ).squeeze(1)
 
-        gt_tensor = torch.from_numpy(forged_masks).to(config.DINOV3_DEVICE)
-
-        loss = loss_fn(pred_masks_resized, gt_tensor)
+        gt_tensor = torch.from_numpy(forged_masks).float().to(config.DINOV3_DEVICE)
+        gt_tensor_resized = torch.nn.functional.interpolate(
+            gt_tensor.unsqueeze(1),
+            size=(target_size, target_size),
+            mode='nearest'
+        ).squeeze(1)
+        loss = loss_fn(pred_masks_resized, gt_tensor_resized)
 
         optimizer.zero_grad()
         loss.backward()
